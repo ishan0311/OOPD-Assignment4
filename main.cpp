@@ -7,6 +7,7 @@
 #include <vector>
 #include <cctype>
 #include <stdexcept>
+#include <sstream>
 
 using IIITStudent   = Student<std::string, std::string>;
 using IIITDatabase  = StudentDatabase<std::string, std::string>;
@@ -28,32 +29,45 @@ void validateStudentName(const std::string &name) {
 
 bool isAlphabetic(const std::string &str) {
     if (str.empty()) return false;
-    for (char c : str) if (!std::isalpha((unsigned char)c)) return false;
+    for (char c : str)
+        if (!std::isalpha(static_cast<unsigned char>(c))) return false;
     return true;
 }
 
 bool isNumeric(const std::string &str) {
     if (str.empty()) return false;
-    for (char c : str) if (!std::isdigit((unsigned char)c)) return false;
+    for (char c : str)
+        if (!std::isdigit(static_cast<unsigned char>(c))) return false;
     return true;
 }
 
-// -------- OOPD Enrollment Helper --------
+std::string toUpper(const std::string &s) {
+    std::string res = s;
+    for (char &ch : res) {
+        ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    }
+    return res;
+}
+
+// -------- OOPD CHECK (for filtering only) --------
 bool studentHasCourseOOPD(const IIITStudent &s) {
     const std::string oopd = "OOPD";
-    for (const auto &c : s.getCurrentCourses()) if (c == oopd) return true;
-    const auto &completed = s.getCompletedCourses();
-    return (completed.find(oopd) != completed.end());
-}
 
-void ensureOOPDEnrollment(IIITStudent &s) {
-    const std::string oopd = "OOPD";
-    if (!studentHasCourseOOPD(s)) {
-        s.enrollInCourse(oopd);
+    // Check current courses (case-insensitive)
+    for (const auto &c : s.getCurrentCourses()) {
+        if (toUpper(c) == oopd) return true;
     }
+
+    // Check completed courses (keys), case-insensitive
+    const auto &completed = s.getCompletedCourses();
+    for (const auto &p : completed) {
+        if (toUpper(p.first) == oopd) return true;
+    }
+
+    return false;
 }
 
-// -------------- CSV APPEND ----------------
+// -------------- CSV APPEND (with courses + grades) ----------------
 void appendStudentsToCSV(const std::string &filename,
                          const std::vector<IIITStudent> &students)
 {
@@ -75,13 +89,27 @@ void appendStudentsToCSV(const std::string &filename,
     }
 
     if (!exists || empty)
-        out << "name,roll,branch,startYear\n";
+        out << "name,roll,branch,startYear,currentCourses,completedCourses\n";
 
     for (const auto &s : students) {
-        out << s.getName()      << ","
-            << s.getRoll()      << ","
-            << s.getBranch()    << ","
-            << s.getStartYear() << "\n";
+        std::string currentStr, compStr;
+
+        for (const auto &c : s.getCurrentCourses()) {
+            if (!currentStr.empty()) currentStr += ";";
+            currentStr += c;
+        }
+
+        for (const auto &p : s.getCompletedCourses()) {
+            if (!compStr.empty()) compStr += ";";
+            compStr += p.first + ":" + std::to_string(p.second);
+        }
+
+        out << s.getName()           << ","
+            << s.getRoll()           << ","
+            << s.getBranch()         << ","
+            << s.getStartYear()      << ","
+            << currentStr            << ","
+            << compStr               << "\n";
     }
 
     std::cout << "\nSaved " << students.size() << " students to CSV.\n";
@@ -98,7 +126,9 @@ void clearCSV(const std::string &filename, IIITDatabase &db) {
         std::ofstream out(filename, std::ios::trunc);
         db = IIITDatabase();
         std::cout << "\nCSV cleared and memory reset.\n";
-    } else std::cout << "Cancelled.\n";
+    } else {
+        std::cout << "Cancelled.\n";
+    }
 }
 
 // -------------- MANUAL ENTRY ----------------
@@ -160,13 +190,11 @@ void addStudentsManually(IIITDatabase &db) {
 
                 if (!(std::cin >> type)) {
                     std::cin.clear(); std::cin.ignore(10000, '\n');
-                    std::cout << "Enter valid integer.\n";
-                    continue;
+                    std::cout << "Enter valid integer.\n"; continue;
                 }
                 if (type != 1 && type != 2) {
                     std::cin.ignore(10000, '\n');
-                    std::cout << "Enter 1 or 2.\n";
-                    continue;
+                    std::cout << "Enter 1 or 2.\n"; continue;
                 }
                 std::cin.ignore(10000, '\n');
 
@@ -231,8 +259,7 @@ void addStudentsManually(IIITDatabase &db) {
             stud.completeCourse(course, grade);
         }
 
-        ensureOOPDEnrollment(stud);    // <<--- required by assignment
-
+        // ✅ No automatic OOPD addition here
         db.addStudent(stud);
         newStudents.push_back(stud);
     }
@@ -240,7 +267,7 @@ void addStudentsManually(IIITDatabase &db) {
     appendStudentsToCSV(CSV_FILE, newStudents);
 }
 
-// -------------- OOPD DISPLAY ----------------
+// -------------- OOPD DISPLAY (FILTER ONLY) ----------------
 void showOOPDStudents(const IIITDatabase &db) {
     std::cout << "\n===== OOPD STUDENTS (IIIT-Delhi) =====\n";
     const auto &all = db.getStudents();
@@ -252,6 +279,7 @@ void showOOPDStudents(const IIITDatabase &db) {
             std::cout << s << "\n";
         }
     }
+
     if (!found) std::cout << "No OOPD students found.\n";
 }
 

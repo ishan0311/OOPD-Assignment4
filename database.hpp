@@ -16,6 +16,7 @@
 #include <type_traits>
 #include <functional>
 #include <iostream>
+#include <cctype>
 
 // ========================
 // StudentDatabase (Q3–Q5)
@@ -27,11 +28,10 @@ public:
     using StudentT = Student<RollT, CourseCodeT>;
 
 private:
-    std::vector<StudentT> students;          // original order
-    std::vector<size_t> sortedIndices;       // index view for sorted order
+    std::vector<StudentT>  students;         // original order
+    std::vector<size_t>    sortedIndices;    // index view for sorted order
     std::vector<long long> threadTimesMs;    // time taken by each sorting thread
 
-    // course → multimap<grade, student-index> (sorted by grade desc)
     using GradeIndex =
         std::unordered_map<CourseCodeT,
                            std::multimap<double, size_t, std::greater<double>>>;
@@ -44,13 +44,16 @@ public:
         students.push_back(s);
     }
 
-    const std::vector<StudentT> &getStudents() const { return students; }
+    const std::vector<StudentT> &getStudents() const {
+        return students;
+    }
 
     // ========================
-    // CSV loading (Q3)
-    // Format assumed:
-    // name,roll,branch,startYear
-    // First non-empty line is treated as header and skipped.
+    // CSV loading (with courses & grades)
+    // CSV format:
+    // name,roll,branch,startYear,currentCourses,completedCourses
+    // currentCourses:  "oopd;ml"
+    // completedCourses:"12345:9.8;ga:7.0"
     // ========================
     bool loadFromCSV(const std::string &filename) {
         std::ifstream file(filename);
@@ -62,41 +65,93 @@ public:
         std::string line;
         bool firstLine = true;
 
-        while (std::getline(file, line)) {
-            if (line.empty())
-                continue;
+        // Optional: start fresh each time you load
+        students.clear();
 
-            // Skip header line (e.g. "name,roll,branch,startYear")
-            if (firstLine) {
+        auto trim = [](std::string &s) {
+            while (!s.empty() &&
+                   std::isspace(static_cast<unsigned char>(s.front())))
+                s.erase(s.begin());
+            while (!s.empty() &&
+                   std::isspace(static_cast<unsigned char>(s.back())))
+                s.pop_back();
+        };
+
+        while (std::getline(file, line)) {
+            if (line.empty()) continue;
+
+            if (firstLine) {   // header
                 firstLine = false;
                 continue;
             }
 
             std::stringstream ss(line);
-            std::string name, rollStr, branch, startYearStr;
+            std::string name, rollStr, branch, yearStr, currentStr, completedStr;
 
-            if (!std::getline(ss, name, ','))       continue;
-            if (!std::getline(ss, rollStr, ','))    continue;
-            if (!std::getline(ss, branch, ','))     continue;
-            if (!std::getline(ss, startYearStr, ',')) continue;
+            if (!std::getline(ss, name, ','))        continue;
+            if (!std::getline(ss, rollStr, ','))     continue;
+            if (!std::getline(ss, branch, ','))      continue;
+            if (!std::getline(ss, yearStr, ','))     continue;
+            if (!std::getline(ss, currentStr, ','))  currentStr.clear();
+            if (!std::getline(ss, completedStr, ',')) completedStr.clear();
+
+            trim(name);
+            trim(rollStr);
+            trim(branch);
+            trim(yearStr);
+            trim(currentStr);
+            trim(completedStr);
 
             try {
-                int startYear = std::stoi(startYearStr);
+                int startYear = std::stoi(yearStr);
 
                 RollT rollValue{};
                 if constexpr (std::is_same<RollT, std::string>::value) {
                     rollValue = rollStr;
                 } else if constexpr (std::is_integral<RollT>::value) {
                     rollValue = static_cast<RollT>(std::stoull(rollStr));
-                } else {
-                    rollValue = RollT(rollStr);
                 }
 
                 StudentT s(name, rollValue, branch, startYear);
+
+                // Parse current courses: "oopd;ml"
+                if (!currentStr.empty()) {
+                    std::stringstream cc(currentStr);
+                    std::string token;
+                    while (std::getline(cc, token, ';')) {
+                        trim(token);
+                        if (!token.empty()) {
+                            s.enrollInCourse(token);
+                        }
+                    }
+                }
+
+                // Parse completed: "12345:9.8;ga:7.0"
+                if (!completedStr.empty()) {
+                    std::stringstream cm(completedStr);
+                    std::string token;
+                    while (std::getline(cm, token, ';')) {
+                        trim(token);
+                        if (token.empty()) continue;
+
+                        auto pos = token.find(':');
+                        if (pos == std::string::npos) continue;
+
+                        std::string course   = token.substr(0, pos);
+                        std::string gradeStr = token.substr(pos + 1);
+                        trim(course);
+                        trim(gradeStr);
+
+                        double grade = std::stod(gradeStr);
+                        s.completeCourse(course, grade);
+                    }
+                }
+
                 students.push_back(s);
-            } catch (const std::exception &e) {
-                std::cerr << "Skipping invalid CSV line: '"
-                          << line << "' (reason: " << e.what() << ")\n";
+            }
+            catch (const std::exception &e) {
+                std::cerr << "Skipping invalid CSV row: '" << line
+                          << "' (" << e.what() << ")\n";
             }
         }
 
@@ -104,7 +159,7 @@ public:
     }
 
     // ========================
-    // Parallel sort by roll (Q3)
+    // Parallel sort by roll
     // ========================
     void parallelSortByRoll(std::size_t numThreads = 2) {
         const std::size_t n = students.size();
@@ -116,18 +171,10 @@ public:
         sortedIndices.resize(n);
         std::iota(sortedIndices.begin(), sortedIndices.end(), 0);
 
-        // 🔹 Enforce at least 2 threads (assignment requirement),
-        // but never more than number of students.
-        if (numThreads < 2) {
-            numThreads = 2;
-        }
-        if (numThreads > n) {
-            numThreads = n;
-        }
-        // If n == 1, numThreads will become 1 (edge safety)
-        if (numThreads == 0) {
-            numThreads = 1;
-        }
+        // Enforce at least 2 threads (assignment requirement)
+        if (numThreads < 2) numThreads = 2;
+        if (numThreads > n) numThreads = n;
+        if (numThreads == 0) numThreads = 1;
 
         threadTimesMs.assign(numThreads, 0);
 
@@ -137,11 +184,10 @@ public:
         std::vector<std::pair<std::size_t, std::size_t>> segments;
         segments.reserve(numThreads);
 
-        // create segments
         std::size_t baseSize = n / numThreads;
         std::size_t remainder = n % numThreads;
-
         std::size_t start = 0;
+
         for (std::size_t i = 0; i < numThreads; ++i) {
             std::size_t blockSize = baseSize + (i < remainder ? 1 : 0);
             std::size_t end = start + blockSize;
@@ -153,7 +199,6 @@ public:
             return students[a].getRoll() < students[b].getRoll();
         };
 
-        // launch threads to sort their chunks
         for (std::size_t i = 0; i < numThreads; ++i) {
             auto [segStart, segEnd] = segments[i];
 
@@ -165,19 +210,14 @@ public:
                           comp);
 
                 auto tEnd = std::chrono::high_resolution_clock::now();
-                auto duration =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        tEnd - tStart)
-                        .count();
-                threadTimesMs[i] = duration;
+                threadTimesMs[i] =
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        tEnd - tStart).count();
             });
         }
 
-        for (auto &t : threads) {
-            t.join();
-        }
+        for (auto &t : threads) t.join();
 
-        // sequentially merge sorted segments
         std::size_t currentStart = segments[0].first;
         std::size_t currentEnd   = segments[0].second;
 
@@ -189,113 +229,85 @@ public:
                                sortedIndices.begin() + nextStart,
                                sortedIndices.begin() + nextEnd,
                                comp);
+
             currentEnd = nextEnd;
         }
 
-        // Log thread times
-        std::cout << "\nThread timing (Q3 - parallel sort, "
-                  << numThreads << " threads used):\n";
+        std::cout << "\nThread timing (parallel sort, " << numThreads
+                  << " threads used):\n";
         for (std::size_t i = 0; i < numThreads; ++i) {
             auto [segStart, segEnd] = segments[i];
-            std::cout << "  Thread " << i
-                      << " sorted indices [" << segStart << ", " << segEnd
-                      << ") in " << threadTimesMs[i] << " ms\n";
+            std::cout << "  Thread " << i << " sorted block ["
+                      << segStart << ", " << segEnd << ") in "
+                      << threadTimesMs[i] << " microseconds\n";
         }
     }
 
     // ========================
-    // Q4: Show records in original & sorted order
+    // Display functions
     // ========================
-
     void printStudentDetailed(const StudentT &s) const {
         std::cout << s << "\n";
 
         const auto &current = s.getCurrentCourses();
         if (!current.empty()) {
-            std::cout << "    Current courses: ";
-            for (const auto &c : current) {
-                std::cout << c << " ";
-            }
+            std::cout << "    Current: ";
+            for (const auto &c : current) std::cout << c << " ";
             std::cout << "\n";
         }
 
         const auto &completed = s.getCompletedCourses();
         if (!completed.empty()) {
             std::cout << "    Completed: ";
-            for (const auto &p : completed) {
+            for (const auto &p : completed)
                 std::cout << "(" << p.first << ", grade=" << p.second << ") ";
-            }
             std::cout << "\n";
         }
     }
 
-    // Original order using normal forward iterator
     void showOriginalOrder() const {
-        std::cout << "\n=== Original order of records (Q4) ===\n";
-        for (auto it = students.cbegin(); it != students.cend(); ++it) {
-            printStudentDetailed(*it);
+        std::cout << "\n=== Original order of records ===\n";
+        for (const auto &s : students) {
+            printStudentDetailed(s);
         }
     }
 
-    // Sorted order using index-view iterators (no copying of students)
     void showSortedOrder() const {
         if (sortedIndices.empty()) {
-            std::cout << "\nSorted indices empty. Did you call parallelSortByRoll()?\n";
+            std::cout << "\nSorted indices empty. Call parallelSortByRoll() first.\n";
             return;
         }
 
-        std::cout << "\n=== Sorted order by roll (Q4) ===\n";
-        for (auto it = sortedIndices.cbegin(); it != sortedIndices.cend(); ++it) {
-            const StudentT &s = students[*it];
-            printStudentDetailed(s);
-        }
-
-        // also show reverse iteration over sorted order
-        std::cout << "\n=== Reverse iteration over sorted order ===\n";
-        for (auto rit = sortedIndices.crbegin();
-             rit != sortedIndices.crend();
-             ++rit) {
-            const StudentT &s = students[*rit];
-            std::cout << s << "\n";
+        std::cout << "\n=== Sorted order by roll ===\n";
+        for (auto idx : sortedIndices) {
+            printStudentDetailed(students[idx]);
         }
     }
 
     // ========================
-    // Q5: Fast grade-based queries
+    // Grade-based query
     // ========================
-
-    // Build index: course → sorted by grade desc
     void buildGradeIndex() {
         gradeIndex.clear();
         for (std::size_t i = 0; i < students.size(); ++i) {
             const auto &completed = students[i].getCompletedCourses();
             for (const auto &p : completed) {
-                const CourseCodeT &course = p.first;
-                double grade = p.second;
-                gradeIndex[course].emplace(grade, i);
+                gradeIndex[p.first].emplace(p.second, i);
             }
         }
     }
 
-    // Get students with grade >= minGrade in given course
     std::vector<const StudentT *>
     queryByCourseAndMinGrade(const CourseCodeT &course,
                              double minGrade = 9.0) const {
         std::vector<const StudentT *> result;
-
         auto it = gradeIndex.find(course);
-        if (it == gradeIndex.end()) {
-            return result;
-        }
+        if (it == gradeIndex.end()) return result;
 
-        const auto &mm = it->second;
-        for (auto mit = mm.begin(); mit != mm.end(); ++mit) {
-            double grade = mit->first;
-            if (grade < minGrade) break;
-            std::size_t idx = mit->second;
-            result.push_back(&students[idx]);
+        for (const auto &entry : it->second) {
+            if (entry.first < minGrade) break;
+            result.push_back(&students[entry.second]);
         }
-
         return result;
     }
 };
